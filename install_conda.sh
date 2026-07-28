@@ -1,7 +1,6 @@
 # Create symlinks for system-wide access
 sudo rm -rf /shared/tools/miniconda3/bin/conda /usr/local/bin/conda
 sudo rm -rf /shared/tools/miniconda3/bin/mamba /usr/local/bin/mamba
-sudo rm -rf /shared/tools/miniconda3/bin/python /usr/local/bin/python3-shared
 
 sudo rm -rf /shared/tools/miniconda3
 
@@ -19,8 +18,10 @@ sudo /shared/tools/miniconda3/bin/conda install -n base -c conda-forge mamba -y
 # Create symlinks for system-wide access
 sudo ln -s /shared/tools/miniconda3/bin/conda /usr/local/bin/conda
 sudo ln -s /shared/tools/miniconda3/bin/mamba /usr/local/bin/mamba
-sudo ln -s /shared/tools/miniconda3/bin/python /usr/local/bin/python3-shared
 
 # Set permissions
 sudo chown -R root:devtools /shared/tools/miniconda3
 sudo chmod -R 775 /shared/tools/miniconda3
+
+# add to env on login
+sudo ln -s /shared/tools/miniconda3/etc/profile.d/conda.sh /etc/profile.d/conda.sh
