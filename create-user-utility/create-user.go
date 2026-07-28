@@ -300,6 +300,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+
 // Create user asynchronously
 func (m Model) createUser() tea.Cmd {
 	return func() tea.Msg {
@@ -517,9 +518,6 @@ quota -s
 
 # View shared directories
 ls -la /shared/
-
-# Activate conda environment
-source /shared/tools/miniconda3/etc/profile.d/conda.sh
 
 # Use mamba
 mamba create -n myenv python=3.11
