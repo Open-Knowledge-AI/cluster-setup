@@ -39,6 +39,9 @@ export NVIDIA_CONTAINER_TOOLKIT_VERSION=1.19.1-1
       libnvidia-container-tools=${NVIDIA_CONTAINER_TOOLKIT_VERSION} \
       libnvidia-container1=${NVIDIA_CONTAINER_TOOLKIT_VERSION}
 
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+
 # Install Podman
 sudo apt install -y podman podman-docker
 
