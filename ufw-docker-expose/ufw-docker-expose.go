@@ -365,7 +365,6 @@ func (m model) execute() (tea.Model, tea.Cmd) {
 
 		args := []string{
 			"ufw",
-			"route",
 		}
 
 		args = append(args, strings.Fields(ufwAction)...)

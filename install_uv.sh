@@ -1,3 +1,15 @@
+# Clear uv's internal cache
+uv cache clean || true
+
+# Delete uv-managed Python versions
+rm -r "$(uv python dir)" || true
+
+# Delete uv-managed global tools
+rm -r "$(uv tool dir)" || true
+
+rm -rf ~/.config/uv || true
+rm -rf ~/.cache/uv || true
+
 # Install UV
 curl -LsSf https://astral.sh/uv/install.sh | sudo sh
 
@@ -26,15 +38,13 @@ sudo chmod +x /etc/profile.d/uv-shared.sh
 # Create UV configuration file
 mkdir -p /etc/uv
 sudo tee /etc/uv/uv.toml <<'EOF'
-[cache]
-dir = "/shared/tools/python-packages/uv-cache"
-
-[python]
-install-dir = "/shared/tools/python-packages/python-versions"
-
-[tool]
-dir = "/shared/tools/python-packages/uv-tools"
-
-[install]
-target = "/shared/tools/python-packages/site-packages"
+cache-dir = "/shared/tools/python-packages/uv-cache"
+concurrent-downloads = 8
+concurrent-builds = 4
+concurrent-installs = 4
+index-url = "https://pypi.org/simple"
+resolution = "highest"
+prerelease = "if-necessary"
+compile-bytecode = false
+link-mode = "clone"
 EOF
