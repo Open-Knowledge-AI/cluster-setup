@@ -8,15 +8,15 @@ import (
 	"strconv"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 const (
-	// Replace these with the subnets you want to use when the user
-	// leaves the subnet field empty.
-	defaultSubnets = "172.16.0.0/12;192.168.0.0/16"
+	// These are local Docker subnets, NOT the external IP subnets.
+	// They are passed to ufw-docker as a space-separated list.
+	defaultDockerSubnets = "172.16.0.0/12 192.168.0.0/16"
 
 	defaultProtocol = "tcp"
 )
@@ -24,17 +24,19 @@ const (
 type field int
 
 const (
-	subnetField field = iota
+	externalSubnetsField field = iota
+	dockerSubnetsField
 	actionField
 	protocolField
 	portField
 )
 
 type model struct {
-	subnets  textinput.Model
-	action   textinput.Model
-	protocol textinput.Model
-	port     textinput.Model
+	externalSubnets textinput.Model
+	dockerSubnets   textinput.Model
+	action          textinput.Model
+	protocol        textinput.Model
+	port            textinput.Model
 
 	focused field
 	done    bool
@@ -69,20 +71,33 @@ func newInput(placeholder, value string) textinput.Model {
 	t := textinput.New()
 	t.Placeholder = placeholder
 	t.SetValue(value)
-	t.CharLimit = 256
-	t.Width = 50
+	t.CharLimit = 512
+	t.Width = 60
+
 	return t
 }
 
 func initialModel() model {
 	m := model{
-		subnets:  newInput(defaultSubnets, defaultSubnets),
+		// Intentionally empty: these are the external/source IPs.
+		externalSubnets: newInput(
+			"203.0.113.10/32;198.51.100.0/24",
+			"",
+		),
+
+		// These are local Docker networks and are passed to ufw-docker.
+		dockerSubnets: newInput(
+			"172.16.0.0/12 192.168.0.0/16",
+			defaultDockerSubnets,
+		),
+
 		action:   newInput("add or delete", "add"),
-		protocol: newInput("tcp or udp", defaultProtocol),
+		protocol: newInput("tcp, udp, or all", defaultProtocol),
 		port:     newInput("container port", ""),
 	}
 
-	m.subnets.Focus()
+	m.externalSubnets.Focus()
+
 	return m
 }
 
@@ -99,6 +114,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 		}
+
 		return m, nil
 	}
 
@@ -118,6 +134,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focused == portField {
 				return m.execute()
 			}
+
 			m.nextField()
 		}
 	}
@@ -125,12 +142,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
 	switch m.focused {
-	case subnetField:
-		m.subnets, cmd = m.subnets.Update(msg)
+	case externalSubnetsField:
+		m.externalSubnets, cmd = m.externalSubnets.Update(msg)
+
+	case dockerSubnetsField:
+		m.dockerSubnets, cmd = m.dockerSubnets.Update(msg)
+
 	case actionField:
 		m.action, cmd = m.action.Update(msg)
+
 	case protocolField:
 		m.protocol, cmd = m.protocol.Update(msg)
+
 	case portField:
 		m.port, cmd = m.port.Update(msg)
 	}
@@ -142,14 +165,20 @@ func (m *model) nextField() {
 	m.blurAll()
 
 	switch m.focused {
-	case subnetField:
+	case externalSubnetsField:
+		m.focused = dockerSubnetsField
+
+	case dockerSubnetsField:
 		m.focused = actionField
+
 	case actionField:
 		m.focused = protocolField
+
 	case protocolField:
 		m.focused = portField
+
 	case portField:
-		m.focused = subnetField
+		m.focused = externalSubnetsField
 	}
 
 	m.focusCurrent()
@@ -159,12 +188,18 @@ func (m *model) previousField() {
 	m.blurAll()
 
 	switch m.focused {
-	case subnetField:
+	case externalSubnetsField:
 		m.focused = portField
+
+	case dockerSubnetsField:
+		m.focused = externalSubnetsField
+
 	case actionField:
-		m.focused = subnetField
+		m.focused = dockerSubnetsField
+
 	case protocolField:
 		m.focused = actionField
+
 	case portField:
 		m.focused = protocolField
 	}
@@ -173,7 +208,8 @@ func (m *model) previousField() {
 }
 
 func (m *model) blurAll() {
-	m.subnets.Blur()
+	m.externalSubnets.Blur()
+	m.dockerSubnets.Blur()
 	m.action.Blur()
 	m.protocol.Blur()
 	m.port.Blur()
@@ -181,12 +217,18 @@ func (m *model) blurAll() {
 
 func (m *model) focusCurrent() {
 	switch m.focused {
-	case subnetField:
-		m.subnets.Focus()
+	case externalSubnetsField:
+		m.externalSubnets.Focus()
+
+	case dockerSubnetsField:
+		m.dockerSubnets.Focus()
+
 	case actionField:
 		m.action.Focus()
+
 	case protocolField:
 		m.protocol.Focus()
+
 	case portField:
 		m.port.Focus()
 	}
@@ -216,22 +258,46 @@ func (m model) View() string {
 	var b strings.Builder
 
 	b.WriteString(titleStyle.Render("UFW Docker Expose"))
+	b.WriteString("\n\n")
+
+	b.WriteString(m.renderField(
+		"External IP subnets",
+		m.externalSubnets,
+		externalSubnetsField,
+	))
 	b.WriteString("\n")
 
-	b.WriteString(m.renderField("Subnets", m.subnets, subnetField))
+	b.WriteString(m.renderField(
+		"Docker subnets",
+		m.dockerSubnets,
+		dockerSubnetsField,
+	))
 	b.WriteString("\n")
 
-	b.WriteString(m.renderField("Action", m.action, actionField))
+	b.WriteString(m.renderField(
+		"Action",
+		m.action,
+		actionField,
+	))
 	b.WriteString("\n")
 
-	b.WriteString(m.renderField("Protocol", m.protocol, protocolField))
+	b.WriteString(m.renderField(
+		"Protocol",
+		m.protocol,
+		protocolField,
+	))
 	b.WriteString("\n")
 
-	b.WriteString(m.renderField("Port", m.port, portField))
+	b.WriteString(m.renderField(
+		"Port",
+		m.port,
+		portField,
+	))
 	b.WriteString("\n\n")
 
 	b.WriteString(helpStyle.Render(
-		"Tab/↑↓: navigate • Enter: next/execute • Esc: quit",
+		"External subnets: semicolon-separated • Docker subnets: space-separated\n" +
+			"Tab/↑↓: navigate • Enter: next/execute • Esc: quit",
 	))
 
 	return b.String()
@@ -252,13 +318,22 @@ func (m model) renderField(
 }
 
 func (m model) execute() (tea.Model, tea.Cmd) {
-	subnets := strings.TrimSpace(m.subnets.Value())
+	externalInput := strings.TrimSpace(m.externalSubnets.Value())
+	dockerSubnets := strings.TrimSpace(m.dockerSubnets.Value())
 	action := strings.ToLower(strings.TrimSpace(m.action.Value()))
 	protocol := strings.ToLower(strings.TrimSpace(m.protocol.Value()))
 	port := strings.TrimSpace(m.port.Value())
 
-	if subnets == "" {
-		subnets = defaultSubnets
+	if externalInput == "" {
+		m.err = fmt.Errorf("at least one external IP subnet is required")
+		m.done = true
+		return m, nil
+	}
+
+	if dockerSubnets == "" {
+		m.err = fmt.Errorf("at least one Docker subnet is required")
+		m.done = true
+		return m, nil
 	}
 
 	if action != "add" && action != "delete" {
@@ -267,8 +342,8 @@ func (m model) execute() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if protocol != "tcp" && protocol != "udp" {
-		m.err = fmt.Errorf("protocol must be 'tcp' or 'udp'")
+	if protocol != "tcp" && protocol != "udp" && protocol != "all" {
+		m.err = fmt.Errorf("protocol must be 'tcp', 'udp', or 'all'")
 		m.done = true
 		return m, nil
 	}
@@ -280,51 +355,61 @@ func (m model) execute() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	parsedSubnets, err := parseSubnets(subnets)
+	externalSubnets, err := parseExternalSubnets(externalInput)
 	if err != nil {
 		m.err = err
 		m.done = true
 		return m, nil
 	}
 
-	commands := make([]string, 0, len(parsedSubnets)*2+1)
+	var commands []string
 
-	for _, subnet := range parsedSubnets {
-		ufwAction := "allow"
-		if action == "delete" {
-			ufwAction = "delete allow"
-		}
-
+	// Apply the UFW rule separately for every external/source subnet.
+	for _, subnet := range externalSubnets {
 		args := []string{
 			"ufw",
 			"route",
 		}
 
-		args = append(args, strings.Fields(ufwAction)...)
+		if action == "delete" {
+			args = append(args, "delete")
+		}
+
+		args = append(args, "allow")
+
+		// "all" means no protocol restriction, so do not include
+		// "proto all" in the UFW command.
+		if protocol != "all" {
+			args = append(args,
+				"proto", protocol,
+			)
+		}
 
 		args = append(args,
-			"proto", protocol,
 			"from", subnet,
 			"to", "any",
 			"port", port,
 		)
 
 		if err := runCommand(args...); err != nil {
-			m.err = fmt.Errorf("ufw command failed for %s: %w", subnet, err)
+			m.err = fmt.Errorf(
+				"ufw command failed for external subnet %s: %w",
+				subnet,
+				err,
+			)
 			m.done = true
 			return m, nil
 		}
 
-		commands = append(commands, "sudo "+strings.Join(args, " "))
+		commands = append(
+			commands,
+			"sudo "+strings.Join(args, " "),
+		)
 	}
 
-	// Update ufw-docker's Docker subnet configuration.
-	//
-	// The value is passed as a single --docker-subnets argument.
-	// Adjust this if your installed ufw-docker version expects a
-	// different separator or syntax.
-	dockerSubnets := strings.Join(parsedSubnets, ",")
-
+	// Docker subnets are deliberately independent from the external
+	// IP subnets above. They are passed to ufw-docker as ONE argument
+	// containing a space-separated list.
 	dockerArgs := []string{
 		"ufw-docker",
 		"install",
@@ -333,25 +418,38 @@ func (m model) execute() (tea.Model, tea.Cmd) {
 	}
 
 	if err := runCommand(dockerArgs...); err != nil {
-		m.err = fmt.Errorf("ufw-docker command failed: %w", err)
+		m.err = fmt.Errorf(
+			"ufw-docker command failed: %w",
+			err,
+		)
 		m.done = true
 		return m, nil
 	}
 
-	commands = append(commands, "sudo "+strings.Join(dockerArgs, " "))
+	commands = append(
+		commands,
+		"sudo "+strings.Join(dockerArgs, " "),
+	)
 
+	// Finally reload UFW.
 	reloadArgs := []string{
 		"ufw",
 		"reload",
 	}
 
 	if err := runCommand(reloadArgs...); err != nil {
-		m.err = fmt.Errorf("ufw reload failed: %w", err)
+		m.err = fmt.Errorf(
+			"ufw reload failed: %w",
+			err,
+		)
 		m.done = true
 		return m, nil
 	}
 
-	commands = append(commands, "sudo "+strings.Join(reloadArgs, " "))
+	commands = append(
+		commands,
+		"sudo "+strings.Join(reloadArgs, " "),
+	)
 
 	m.output = strings.Join(commands, "\n")
 	m.done = true
@@ -359,7 +457,7 @@ func (m model) execute() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func parseSubnets(input string) ([]string, error) {
+func parseExternalSubnets(input string) ([]string, error) {
 	raw := strings.Split(input, ";")
 	result := make([]string, 0, len(raw))
 
@@ -372,38 +470,57 @@ func parseSubnets(input string) ([]string, error) {
 
 		ip, network, err := net.ParseCIDR(subnet)
 		if err != nil {
-			return nil, fmt.Errorf("invalid subnet %q: %w", subnet, err)
+			return nil, fmt.Errorf(
+				"invalid external subnet %q: %w",
+				subnet,
+				err,
+			)
 		}
 
 		if ip.To4() == nil {
-			return nil, fmt.Errorf("subnet %q is not IPv4", subnet)
+			return nil, fmt.Errorf(
+				"external subnet %q is not IPv4",
+				subnet,
+			)
 		}
 
 		ones, bits := network.Mask.Size()
 		if bits != 32 {
-			return nil, fmt.Errorf("subnet %q is not IPv4", subnet)
+			return nil, fmt.Errorf(
+				"external subnet %q is not IPv4",
+				subnet,
+			)
 		}
 
-		// Normalise the address so e.g. 192.168.1.10/24 becomes
-		// 192.168.1.0/24.
-		result = append(result, fmt.Sprintf("%s/%d", network.IP.String(), ones))
+		// Normalise the network address.
+		result = append(
+			result,
+			fmt.Sprintf("%s/%d", network.IP.String(), ones),
+		)
 	}
 
 	if len(result) == 0 {
-		return nil, fmt.Errorf("at least one IPv4 subnet is required")
+		return nil, fmt.Errorf(
+			"at least one external IPv4 subnet is required",
+		)
 	}
 
 	return result, nil
 }
 
 func runCommand(args ...string) error {
-	cmd := exec.Command("sudo", args...)
+	cmd := exec.Command(args[0], args[1:]...)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if len(output) > 0 {
-			return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+			return fmt.Errorf(
+				"%w: %s",
+				err,
+				strings.TrimSpace(string(output)),
+			)
 		}
+
 		return err
 	}
 
@@ -411,17 +528,15 @@ func runCommand(args ...string) error {
 }
 
 func main() {
-	// The utility itself can be run as a normal user because every
-	// system command is explicitly executed through sudo.
-	//
-	// If you want to require the entire application to be started
-	// with sudo, uncomment the following check.
-	/*
-		if os.Geteuid() != 0 {
-			fmt.Fprintln(os.Stderr, "Please run with sudo.")
-			os.Exit(1)
-		}
-	*/
+	// The program must be started with sudo or directly as root.
+	// Exit immediately before starting Bubble Tea otherwise.
+	if os.Geteuid() != 0 {
+		fmt.Fprintln(
+			os.Stderr,
+			"This program must be run as root. Try: sudo ufw-docker-expose",
+		)
+		os.Exit(1)
+	}
 
 	p := tea.NewProgram(
 		initialModel(),
