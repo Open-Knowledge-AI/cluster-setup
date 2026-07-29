@@ -14,9 +14,11 @@ import (
 )
 
 const (
+        defaultExternalSubnets = ""
+
 	// These are local Docker subnets, NOT the external IP subnets.
 	// They are passed to ufw-docker as a space-separated list.
-	defaultDockerSubnets = "172.16.0.0/12 192.168.0.0/16"
+	defaultDockerSubnets = "127.0.0.0/8"
 
 	defaultProtocol = "tcp"
 )
@@ -81,13 +83,13 @@ func initialModel() model {
 	m := model{
 		// Intentionally empty: these are the external/source IPs.
 		externalSubnets: newInput(
-			"203.0.113.10/32;198.51.100.0/24",
-			"",
+			"124.214.231.121;213.123.34.12",
+			defaultExternalSubnets,
 		),
 
 		// These are local Docker networks and are passed to ufw-docker.
 		dockerSubnets: newInput(
-			"172.16.0.0/12 192.168.0.0/16",
+			defaultDockerSubnets,
 			defaultDockerSubnets,
 		),
 
@@ -318,22 +320,13 @@ func (m model) renderField(
 }
 
 func (m model) execute() (tea.Model, tea.Cmd) {
-	externalInput := strings.TrimSpace(m.externalSubnets.Value())
-	dockerSubnets := strings.TrimSpace(m.dockerSubnets.Value())
+	subnets := strings.TrimSpace(m.externalSubnets.Value())
 	action := strings.ToLower(strings.TrimSpace(m.action.Value()))
 	protocol := strings.ToLower(strings.TrimSpace(m.protocol.Value()))
 	port := strings.TrimSpace(m.port.Value())
 
-	if externalInput == "" {
-		m.err = fmt.Errorf("at least one external IP subnet is required")
-		m.done = true
-		return m, nil
-	}
-
-	if dockerSubnets == "" {
-		m.err = fmt.Errorf("at least one Docker subnet is required")
-		m.done = true
-		return m, nil
+	if subnets == "" {
+		subnets = defaultExternalSubnets
 	}
 
 	if action != "add" && action != "delete" {
@@ -342,8 +335,8 @@ func (m model) execute() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if protocol != "tcp" && protocol != "udp" && protocol != "all" {
-		m.err = fmt.Errorf("protocol must be 'tcp', 'udp', or 'all'")
+	if protocol != "tcp" && protocol != "udp" {
+		m.err = fmt.Errorf("protocol must be 'tcp' or 'udp'")
 		m.done = true
 		return m, nil
 	}
@@ -355,106 +348,127 @@ func (m model) execute() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	externalSubnets, err := parseExternalSubnets(externalInput)
+	parsedSubnets, err := parseExternalSubnets(subnets)
 	if err != nil {
 		m.err = err
 		m.done = true
 		return m, nil
 	}
 
-	var commands []string
+	commands := make([]string, 0, len(parsedSubnets)*3+2)
 
-	// Apply the UFW rule separately for every external/source subnet.
-	for _, subnet := range externalSubnets {
+	for _, subnet := range parsedSubnets {
+		ufwAction := "allow"
+		if action == "delete" {
+			ufwAction = "delete allow"
+		}
+
 		args := []string{
 			"ufw",
 			"route",
 		}
 
-		if action == "delete" {
-			args = append(args, "delete")
-		}
-
-		args = append(args, "allow")
-
-		// "all" means no protocol restriction, so do not include
-		// "proto all" in the UFW command.
-		if protocol != "all" {
-			args = append(args,
-				"proto", protocol,
-			)
-		}
+		args = append(args, strings.Fields(ufwAction)...)
 
 		args = append(args,
+			"proto", protocol,
 			"from", subnet,
 			"to", "any",
 			"port", port,
 		)
 
 		if err := runCommand(args...); err != nil {
-			m.err = fmt.Errorf(
-				"ufw command failed for external subnet %s: %w",
-				subnet,
-				err,
-			)
+			m.err = fmt.Errorf("ufw command failed for %s: %w", subnet, err)
 			m.done = true
 			return m, nil
 		}
 
-		commands = append(
-			commands,
-			"sudo "+strings.Join(args, " "),
-		)
+		commands = append(commands, "sudo "+strings.Join(args, " "))
 	}
 
-	// Docker subnets are deliberately independent from the external
-	// IP subnets above. They are passed to ufw-docker as ONE argument
-	// containing a space-separated list.
-	dockerArgs := []string{
-		"ufw-docker",
-		"install",
-		"--docker-subnets",
-		dockerSubnets,
+	if action == "add" {
+		// Only resync ufw-docker's chain on add. On delete, calling
+		// `install` here re-inserts/rewrites ufw-user-forward and can
+		// leave the rule we just asked ufw to delete still sitting in
+		// the raw iptables chain even though ufw no longer tracks it.
+		dockerArgs := []string{
+			"ufw-docker",
+			"install",
+			"--docker-subnets",
+			m.dockerSubnets.Value(),
+		}
+
+		if err := runCommand(dockerArgs...); err != nil {
+			m.err = fmt.Errorf("ufw-docker command failed: %w", err)
+			m.done = true
+			return m, nil
+		}
+
+		commands = append(commands, "sudo "+strings.Join(dockerArgs, " "))
+	} else {
+		// Safety net: ufw's own bookkeeping (user.rules) can lose track
+		// of a rule while the equivalent raw entry lingers in
+		// ufw-user-forward (e.g. after a prior ufw-docker install
+		// duplicated it). Explicitly strip any matching iptables rule
+		// for each subnet so nothing orphaned survives the delete.
+		for _, subnet := range parsedSubnets {
+			table := "iptables"
+			if isIPv6Subnet(subnet) {
+				table = "ip6tables"
+			}
+
+			// A given rule spec may have been duplicated (e.g. by a
+			// previous unconditional ufw-docker install), so keep
+			// deleting until iptables reports no more matches, up to
+			// a sane cap to avoid looping forever on unrelated errors.
+			for i := 0; i < 10; i++ {
+				delArgs := []string{
+					table,
+					"-D", "ufw-user-forward",
+					"-s", subnet,
+					"-p", protocol,
+					"-m", protocol,
+					"--dport", port,
+					"-j", "ACCEPT",
+				}
+
+				if err := runCommand(delArgs...); err != nil {
+					// No more matching rules (or it was never there).
+					// Not fatal — this is best-effort cleanup.
+					break
+				}
+
+				commands = append(commands, "sudo "+strings.Join(delArgs, " "))
+			}
+		}
 	}
 
-	if err := runCommand(dockerArgs...); err != nil {
-		m.err = fmt.Errorf(
-			"ufw-docker command failed: %w",
-			err,
-		)
-		m.done = true
-		return m, nil
-	}
-
-	commands = append(
-		commands,
-		"sudo "+strings.Join(dockerArgs, " "),
-	)
-
-	// Finally reload UFW.
 	reloadArgs := []string{
 		"ufw",
 		"reload",
 	}
 
 	if err := runCommand(reloadArgs...); err != nil {
-		m.err = fmt.Errorf(
-			"ufw reload failed: %w",
-			err,
-		)
+		m.err = fmt.Errorf("ufw reload failed: %w", err)
 		m.done = true
 		return m, nil
 	}
 
-	commands = append(
-		commands,
-		"sudo "+strings.Join(reloadArgs, " "),
-	)
+	commands = append(commands, "sudo "+strings.Join(reloadArgs, " "))
 
 	m.output = strings.Join(commands, "\n")
 	m.done = true
 
 	return m, nil
+}
+
+// isIPv6Subnet reports whether the given CIDR string is an IPv6 subnet.
+func isIPv6Subnet(cidr string) bool {
+	ip, _, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return false
+	}
+	return ip.To4() == nil
 }
 
 func parseExternalSubnets(input string) ([]string, error) {
